@@ -6,6 +6,16 @@
 @Desc      : This module implements the Pointer Network for selecting
 answer spans, as described in:
 https://openreview.net/pdf?id=B1-q5Pqxl
+lstm是三维的，最基本单位是hidden unit，一般情况下，一个hidden unit对应一个cell unit，
+但二者的数目也可以不同，通过神经网络做转换即可（矩阵乘法）。单个hidden unit有三个输入，
+分别是cell state，hidden state和input，有两个相等的输出，分别是hidden state和output。
+对于整个三维lstm，输出维度是l×q，hidden state维度是l×number_layers。l是hidden size，
+理论上讲，不同的lstm layer的hidden units数目可以是不同的，但实际应用中往往是相同的，
+减少要拟合的参数的个数。input的vector dimension理论上与hidden units数目也是不同的，
+但在实际应用中往往也取成相同的，这样转换层也相对简单。
+当然了，神经网络的设计是灵活的，对于hidden state，维度也不一定用l×number_layers，
+也可以是l×1，这样的话，使用hidden state的lstm就可以只用l×1的hidden state，也就是
+只有一层lstm接受hidden state，其他的lstm的hidden state用0默认填满。
 """
 
 import tensorflow as tf
@@ -16,6 +26,7 @@ def custom_dynamic_rnn(cell, inputs, inputs_len, initial_state=None):
     """
     对dynamic_rnn进行改动与重载
     这是相当基本的一个函数，一般不需要改动和重载
+    通过重载这个函数，可以看到lstm在x轴上是如何延伸的
     Implements a dynamic rnn that can store scores in the pointer network,
     the reason why we implements this is that the raw_rnn or dynamic_rnn
     function in Tensorflow
@@ -113,6 +124,8 @@ def attend_pooling(pooling_vectors, ref_vector, hidden_size, scope=None):
     Applies attend pooling to a set of vectors according to a reference vector.
     max pooling的目的是减少参数个数，vector发生了变换，维度都变掉了
     attend pooling前后，vector维度不变，但矩阵本身发生了变换
+    此处attend_pooling是用来对question encodes来做矩阵变换，但使用的ref_vector是
+    随机给的，或者是需要拟合的
     Args:
         pooling_vectors: the vectors to pool
         ref_vector: the reference vector
@@ -144,6 +157,7 @@ def attend_pooling(pooling_vectors, ref_vector, hidden_size, scope=None):
 class PointerNetLSTMCell(tc.rnn.LSTMCell):
     """
     Implements the Pointer Network Cell
+    自定义的lstm cell，
     """
     def __init__(self, num_units, context_to_point):
         """num_units其实是hidden units的个数，一般来说memory units也是同样数目"""
@@ -185,6 +199,11 @@ class PointerNetDecoder:
 
     def decode(self, passage_vectors, question_vectors, init_with_question=True):
         """
+        decode是一层lstm（或多层lstm），一层lstm有三个输入，cell state、hidden state
+        和input，在下面的实现中，question_vectors充当cell state、hidden state，
+        但维度不匹配，所以需要做额外的转换，因为只预测start和end，所以input使用
+        fake input，lstm的输出对passage_vectors进行attend，拿到attend概率分布，
+        就是最后需要输出的值
         Use Pointer Network to compute the probabilities of each position
         to be start and end of the answer
         Args:
@@ -206,11 +225,15 @@ class PointerNetDecoder:
                                                                    self.hidden_size]),
                                                  trainable=True,
                                                  name="random_attn_vector")
+                # 为什么用tf.Variable而不是tf.constant或者tf.placeholder
+                # 并不是需要拟合的变量啊
                 pooled_question_rep = tc.layers.fully_connected(
                     attend_pooling(question_vectors, random_attn_vector,
                                    self.hidden_size),
                     num_outputs=self.hidden_size, activation_fn=None
                 )
+                # 在内部把question_vectors的维度转成self.hidden_size，也就是hidden
+                # units的数目，其实也可以在外部转换之后再作为state输入
                 init_state = tc.rnn.LSTMStateTuple(pooled_question_rep,
                                                    pooled_question_rep)
                 # 对hidden state进行初始化？在初始化钱要对question_vectors进行
@@ -222,6 +245,8 @@ class PointerNetDecoder:
             with tf.variable_scope('fw'):
                 fw_cell = PointerNetLSTMCell(self.hidden_size, passage_vectors)
                 # 此处self.hidden_size是PointerNetLSTMCell的number of hidden units
+                # 这里得到的是单层的lstm cell, 如果要变成多层的cell,
+                # 需要调用tc.rnn.MultiRNNCell
                 fw_outputs, _ = custom_dynamic_rnn(fw_cell, fake_inputs,
                                                    sequence_len, init_state)
                 # 对于向前的lstm，输出的outputs是passage的这个位置是answer开始和结束
@@ -234,4 +259,12 @@ class PointerNetDecoder:
             start_prob = (fw_outputs[0:, 0, 0:] + bw_outputs[0:, 1, 0:]) / 2
             end_prob = (fw_outputs[0:, 1, 0:] + bw_outputs[0:, 0, 0:]) / 2
             # 对前后lstm进行平均
+            # 此处的两个lstm应该是不必要的，有一个lstm应该就够了，否则的话，两个lstm其实
+            # 是一样的，导致start_prob和end_prob相等
+            # 第一个是start, 第二个是end；第一个是end，第二个是start；第一个是一端，
+            # 第二个是另一端
+            # 给定start，看后边的词，或者一定范围内
             return start_prob, end_prob
+            # 返回的start_prob, end_prob在拟合的时候会用到，可能要用cross entropy公式。
+            # 也有可能用来评估生成句子的更复杂的量度
+            # 在evaluate的时候也会用到，用来得到最后的答案。

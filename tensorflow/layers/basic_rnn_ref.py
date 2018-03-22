@@ -114,4 +114,7 @@ def get_cell(rnn_type, hidden_size, layer_num=1, dropout_keep_prob=None):
     if layer_num > 1:
         cell = tc.rnn.MultiRNNCell([cell]*layer_num, state_is_tuple=True)
         # 经过这个类处理后，在y轴方向上叠加多个cell
+        # 如何添加多层, 把一个单层的cell变成多层的cell
+        # 此处各层的hidden units数目是相同的，所以是[cell, cell, ...]
+        # 也可以设置成不同的，这样列表里就是不同的cell了
     return cell
